@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<style>
+  body { font: 13px system-ui; width: 380px; margin: 12px; }
+  .brand { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 15px; }
+  label.opt { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+  h4 { margin: 8px 0 6px; font-size: 12px; text-transform: uppercase; color: #666; }
+  .item { padding: 8px 0; border-top: 1px solid #ddd; }
+  .item input[type=text] { width: 100%; box-sizing: border-box; padding: 4px 6px; margin-bottom: 6px; font: inherit; }
+  .actions { display: flex; gap: 8px; align-items: center; }
+  .meta { flex: 1; color: #666; font-size: 11px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty { color: #666; }
+  button, select { cursor: pointer; font: inherit; }
+</style>
+<div class="brand"><img src="icons/48.png" width="28" height="28" alt=""><strong>Hoardini</strong></div>
+<label class="opt"><input type="checkbox" id="intercept"> Capture browser downloads</label>
+<h4>Media on this page</h4>
+<div id="list" class="empty">Looking…</div>
+<datalist id="names"></datalist>
+<script src="popup.js"></script>

@@ -1,0 +1,14 @@
+[package]
+name = "hoardini-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hoardini"
+path = "src/main.rs"
+
+[dependencies]
+hoardini-core.workspace = true
+tokio.workspace = true
+url.workspace = true

@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Hoardini",
+  "version": "0.4.1",
+  "description": "Send downloads to Hoardini for fast, segmented downloading.",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "nativeMessaging",
+    "cookies",
+    "storage",
+    "webRequest",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Hoardini",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png",
+      "128": "icons/128.png"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAtxkJFNQcAA2Bg7xqUvu162dvLrZTvVm7Zq23xIbMP7eDemmaxh/NtOjicm4IBSLvar3xZZqt0z4ZD8L0CvEuV9coEiaN5EiRz2KUyXdXgYWI7Va8urqFGatPoKie+ZjCmeZMjC0dIiRHiuhRrmJEIJrA/IgzwL8IelYRN2RVmb32dsysAx1WW8ybZfc85o2ybqn72ZQ7UJGpwkJvquWhBeTLzQ/dBJMpS9RqWexHZLGOEyZIo/Wr5AvG3haevs/3AmvSAcoHKhipCD2gf7zHAe/WNC3bVcrwVgG15azguKbztUOWw7MI0hSkFPzUyTcp6qZ+0/cssBmQ21S4tSof5QIDAQAB",
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}
