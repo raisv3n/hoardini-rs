@@ -1,4 +1,4 @@
-# Push a tag like v0.5.5 to build, test and publish a GitHub Release with the Windows zip.
+# Push a tag like v0.5.7 to build, test and publish a GitHub Release with the Windows zip.
 # (Run it by hand from the Actions tab to get the zip as a build artifact without releasing.)
 name: release
 
@@ -7,18 +7,31 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+# Everything runs with a read-only token; only the publish job below may write (to create the release).
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  windows:
+  build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions are pinned to commits (tags can be moved); the comment says which release.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      # No build cache here: released binaries are always built from scratch.
+
+      - name: Check the tag matches the version in Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if ("v$version" -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME does not match Cargo.toml version $version" }
 
       # ffmpeg lets the conversion tests run instead of being skipped.
       - name: Install ffmpeg
@@ -31,18 +44,31 @@ jobs:
         shell: pwsh
         run: ./scripts/package.ps1
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hoardini-windows-x64
           path: |
             dist/*.zip
             dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: hoardini-windows-x64
+          path: dist
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: |
             dist/*.zip
             dist/*.sha256
           generate_release_notes: true
+          fail_on_unmatched_files: true
