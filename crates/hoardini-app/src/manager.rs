@@ -8,9 +8,9 @@ use std::{
 };
 
 use hoardini_core::{
-    downloader, hls, paths, remux, CancellationToken, DownloadProgress, Error, JobRequest, Options, ProgressFn,
+    downloader, hls, net, pair, paths, remux, CancellationToken, DownloadProgress, Error, JobRequest, Options, ProgressFn,
 };
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, task::JoinHandle};
 use uuid::Uuid;
 
 use crate::model::{DownloadItem, Settings, Status};
@@ -50,11 +50,19 @@ pub struct Manager {
 struct Inner {
     items: Vec<DownloadItem>,
     settings: Settings,
-    tasks: HashMap<Uuid, CancellationToken>,
+    tasks: HashMap<Uuid, Running>,
+    /// Paused tasks that may still be unwinding. A resume waits for its download's task, so it reuses
+    /// the same name (and its files) instead of finding the name locked and starting "Name (1)".
+    stopping: HashMap<Uuid, JoinHandle<()>>,
     last_sample: HashMap<Uuid, (Instant, u64)>,
     ffmpeg: Ffmpeg,
     /// Show "ffmpeg installed" until dismissed.
     ffmpeg_just_installed: bool,
+}
+
+struct Running {
+    token: CancellationToken,
+    handle: JoinHandle<()>,
 }
 
 fn queue_file() -> PathBuf {
@@ -88,9 +96,9 @@ impl Manager {
         for item in &mut items {
             item.speed = 0.0;
             item.converting = None; // a conversion cannot survive a quit
-            // Anything mid-flight when the app quit is resumable; HLS cannot resume, so it restarts.
+            // Anything mid-flight when the app quit is paused, ready to resume where it stopped.
             if item.status == Status::Downloading {
-                item.status = if item.request.is_hls() { Status::Queued } else { Status::Paused };
+                item.status = Status::Paused;
             }
         }
         let ffmpeg = remux::ffmpeg_path().map_or(Ffmpeg::Missing, Ffmpeg::Found);
@@ -99,6 +107,7 @@ impl Manager {
                 items,
                 settings,
                 tasks: HashMap::new(),
+                stopping: HashMap::new(),
                 last_sample: HashMap::new(),
                 ffmpeg,
                 ffmpeg_just_installed: false,
@@ -337,8 +346,9 @@ impl Manager {
         }
         g.items[i].status = Status::Paused;
         g.items[i].speed = 0.0;
-        if let Some(t) = g.tasks.remove(&id) {
-            t.cancel();
+        if let Some(r) = g.tasks.remove(&id) {
+            r.token.cancel();
+            g.stopping.insert(id, r.handle);
         }
         Self::save(&g);
         self.pump(&mut g);
@@ -360,23 +370,22 @@ impl Manager {
     /// Stops the download and deletes any partial data.
     pub fn cancel_and_remove(self: &Arc<Self>, id: Uuid) {
         let mut g = self.lock();
-        if let Some(t) = g.tasks.remove(&id) {
-            t.cancel();
+        let mut running: Vec<JoinHandle<()>> = g.stopping.remove(&id).into_iter().collect();
+        if let Some(r) = g.tasks.remove(&id) {
+            r.token.cancel();
+            running.push(r.handle);
         }
         if let Some(i) = index(&g, id) {
             let item = g.items.remove(i);
             if item.status != Status::Completed {
-                if let Some(d) = &item.destination {
-                    // The task may still be closing its file handles; retry briefly off the UI thread.
-                    let leftovers = [".part", ".hoardini"].map(|s| hoardini_core::net::with_suffix(d, s));
+                if let Some(d) = item.destination {
+                    // Deleted only once the download has stopped writing, so nothing is recreated afterwards:
+                    // .part, .hoardini and the hidden per-track files of a split stream.
                     self.rt.spawn(async move {
-                        for _ in 0..10 {
-                            leftovers.iter().for_each(|p| drop(fs::remove_file(p)));
-                            if leftovers.iter().all(|p| !p.exists()) {
-                                break;
-                            }
-                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        for h in running {
+                            let _ = h.await;
                         }
+                        net::remove_partial(&d);
                     });
                 }
             }
@@ -474,19 +483,25 @@ impl Manager {
     /// Called on quit: running downloads are paused so they resume on next launch.
     pub fn shutdown(&self) {
         let mut g = self.lock();
-        let had_tasks = !g.tasks.is_empty();
-        for (_, t) in g.tasks.drain() {
-            t.cancel();
+        let mut running: Vec<JoinHandle<()>> = g.stopping.drain().map(|(_, h)| h).collect();
+        for (_, r) in g.tasks.drain() {
+            r.token.cancel();
+            running.push(r.handle);
         }
         for item in g.items.iter_mut().filter(|i| i.status == Status::Downloading) {
             item.status = Status::Paused;
         }
         Self::save(&g);
         drop(g);
-        if had_tasks {
-            // Let segment tasks flush their resume state.
-            std::thread::sleep(Duration::from_millis(300));
-        }
+        // Let the downloads save their resume state and stop ffmpeg (a merge is cut short; it reruns on resume).
+        self.rt.block_on(async {
+            let all = async {
+                for h in running {
+                    let _ = h.await;
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_secs(5), all).await;
+        });
     }
 
     // MARK: - Scheduling
@@ -520,7 +535,7 @@ impl Manager {
         };
 
         let token = CancellationToken::new();
-        g.tasks.insert(id, token.clone());
+        let prior = g.stopping.remove(&id);
         let mut opts = Options::new(&self.downloads_dir);
         opts.headers = req.headers();
         opts.filename = name;
@@ -542,9 +557,20 @@ impl Manager {
             }
         });
         let m = self.clone();
-        self.rt.spawn(async move {
+        let t = token.clone();
+        let handle = self.rt.spawn(async move {
+            let token = t;
+            // A quick Pause → Resume: let the paused run release its name lock and files first.
+            if let Some(p) = prior {
+                let _ = p.await;
+            }
+            if token.is_cancelled() {
+                return;
+            }
             let result = if req.is_hls() {
                 hls::download(&url, &opts, progress).await
+            } else if let Some(audio) = req.valid_audio() {
+                pair::download(&url, &audio, &opts, progress).await
             } else {
                 downloader::download(&url, &opts, progress).await
             };
@@ -567,6 +593,7 @@ impl Manager {
             }
             m.repaint();
         });
+        g.tasks.insert(id, Running { token, handle });
     }
 
     fn progress(&self, id: Uuid, p: DownloadProgress) {
@@ -601,7 +628,7 @@ impl Manager {
         item.fraction = Some(1.0);
         item.speed = 0.0;
         item.request.cookies = None; // session cookies are not kept once they are no longer needed
-        let mut auto = g.settings.auto_convert && g.items[i].should_auto_convert();
+        let mut auto = g.settings.auto_convert && g.items[i].can_convert();
         if auto && !matches!(g.ffmpeg, Ffmpeg::Found(_)) {
             // Not an error: the notice offers ffmpeg, and this converts once it's installed.
             g.items[i].needs_ffmpeg = true;

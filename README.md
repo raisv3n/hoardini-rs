@@ -24,8 +24,9 @@
 
 - **Faster downloads.** Each file is split into up to 8 parts that download at the same time.
 - **Pause and resume.** Pause a download, close the app, or lose your connection: it continues where it stopped.
-- **Save videos.** Detects videos playing on a web page (including HLS `.m3u8` streams) and saves them as one file,
-  then converts them to MP4 without any loss of quality.
+  This works for streamed videos too.
+- **Save videos.** Detects videos playing on a web page (including HLS `.m3u8` streams such as Vimeo and Tella, and
+  Facebook videos in your choice of quality) and saves them as one MP4 without any loss of quality.
 - **Works with your browser.** With the extension installed, Chrome, Edge and Brave hand their downloads to Hoardini
   automatically, and links, videos and images get a **Download with Hoardini** right-click option.
 - **Stays out of the way.** Closing the window keeps downloads running in the system tray.
@@ -53,8 +54,10 @@ It's free and open source, needs no account, and everything runs on your PC.
       `edge://extensions` in Edge or `brave://extensions` in Brave, then press Enter.
    2. Turn on **Developer mode** (top right in Chrome and Brave, left sidebar in Edge).
    3. Click **Load unpacked**.
-   4. In the folder picker, paste `%LOCALAPPDATA%\Hoardini\extension` into the address bar,
-      press Enter, then click **Select Folder**.
+   4. In the folder picker, click the address bar, press **Ctrl+V** (the installer copied
+      `%LOCALAPPDATA%\Hoardini\extension` to the clipboard), press Enter, then click **Select Folder**.
+      **Don't pick the `extension` folder inside the extracted download**: the browser keeps loading the
+      extension from the folder you choose, so it would stop working once you delete the download.
    5. Optional: click the puzzle-piece icon in the toolbar and pin **Hoardini**.
 
 That's it. Open **Hoardini** from the Start menu, or just download something in your browser.
@@ -70,9 +73,10 @@ After installing, you can delete the zip and the extracted folder.
 | Download a file | Download it in your browser as usual: Hoardini takes over. Or click **Add URL** in the app (Ctrl+N) and paste a link. |
 | Save a video from a web page | Play the video, then click the Hoardini toolbar icon. Pick a quality, adjust the file name, and click **Download**. |
 | Download a specific link or image | Right-click it → **Download with Hoardini**. |
-| Pause, resume, retry, cancel | Use the buttons on each download, or right-click it for more options. |
-| Open a finished file | Double-click it, or use the open and folder buttons. Files go to your **Downloads** folder. |
-| Convert videos to MP4 | Happens automatically after a video download (can be turned off in **Settings**). For files you already have, click **Convert files…** (Ctrl+O). |
+| Save a Facebook video | Open the video and click the Hoardini toolbar icon. Pick a quality (720p, 360p… or the HD/SD file) and click **Download**. If the popup asks you to, reload the page first. |
+| Pause, resume, retry, cancel | Use the buttons on each download, or right-click it for more options. Quitting pauses running downloads; resume them next time. |
+| Open a finished file | Double-click it, or use the play/open and folder buttons. Files go to your **Downloads** folder. |
+| Convert videos to MP4 | MPEG-TS videos (`.ts`, `.mts`, `.m2ts`) are converted automatically after downloading (can be turned off in **Settings**). For files you already have, click **Convert files…** (Ctrl+O). |
 | Let the browser handle downloads again | Click the Hoardini toolbar icon and turn off **Capture browser downloads**. |
 | Change the theme | **Settings** (gear icon, bottom left) → **App theme**: Light, Dark or Use system setting. |
 | Quit completely | Right-click the Hoardini icon in the system tray → **Quit Hoardini**. Closing the window only hides it. |
@@ -95,6 +99,14 @@ here, and the release files are built from it by GitHub Actions. Each release al
 4. Check that **Capture browser downloads** is on in the extension's popup.
 
 If the extension can't reach Hoardini, the browser still downloads the file itself, so nothing is lost.
+</details>
+
+<details>
+<summary><b>The extension stopped working after I deleted the download</b></summary>
+
+It was loaded from the folder inside the download. On the extensions page, click **Remove** on the Hoardini card,
+then **Load unpacked** again and choose `%LOCALAPPDATA%\Hoardini\extension`. If that folder is missing, run
+`install.cmd` from a fresh download first.
 </details>
 
 <details>
@@ -166,8 +178,8 @@ Bump `version` in the root `Cargo.toml`, then push a matching tag. The
 [release workflow](.github/workflows/release.yml) tests, builds and publishes the zip and its SHA-256 checksum:
 
 ```powershell
-git tag v0.5.5
-git push origin v0.5.5
+git tag v0.5.7
+git push origin v0.5.7
 ```
 
 ### Dependencies at runtime
@@ -175,7 +187,7 @@ git push origin v0.5.5
 | | Needed for | In the release |
 |---|---|---|
 | Windows 10/11 x64 | everything | required |
-| ffmpeg | MP4 conversion, merging HLS video and audio tracks | optional, not bundled (the usual builds are GPL); the installer and the app offer `winget install Gyan.FFmpeg` |
+| ffmpeg | MP4 conversion, merging separate video and audio tracks (HLS, Facebook) | optional, not bundled (the usual builds are GPL); the installer and the app offer `winget install Gyan.FFmpeg` |
 | Visual C++ runtime | — | not needed: the C runtime is linked statically (`.cargo/config.toml`) |
 
 Hoardini looks for ffmpeg on `PATH`, next to `hoardini-app.exe` and in winget's links folder. `HOARDINI_FFMPEG`
@@ -184,11 +196,13 @@ overrides the search with an exact path.
 ### Command line
 
 ```
-hoardini <url> [-o dir] [-n connections] [-H "Name: value"]... [--headers-stdin] [--name file] [--hls] [--variant url]
+hoardini <url> [-o dir] [-n connections] [-H "Name: value"]... [--headers-stdin] [--name file] [--hls] [--variant url] [--audio url]
 hoardini convert <file.ts>...
 ```
 
-Press Ctrl+C to pause. Running the same command again resumes from the saved segment state.
+`--audio`: `<url>` is a video-only file; the audio-only file is downloaded alongside it and both are merged into
+one MP4 (needs ffmpeg). Press Ctrl+C to pause. Running the same command again resumes from the saved state,
+for files and HLS streams alike.
 
 ### Layout
 
@@ -205,6 +219,11 @@ Download behaviour follows the original's spec:
 - **Partial files:** a `<name>.part` file plus a `<name>.hoardini` JSON sidecar.
 - **Resume:** only while the length and the ETag/Last-Modified still match.
 - **Retries:** 3, with backoff.
+- **HLS resume:** `<name>.hoardini` records, per track, the segment count, segments done, bytes written and the next
+  fMP4 fragment number. A changed stream (source, variant or segment counts) starts over.
+- **Split streams and pairs:** each track downloads to a hidden `.<name>.video.<ext>` / `.<name>.audio.<ext>` file
+  next to the final name, then ffmpeg merges them. fMP4 fragments are renumbered as they are joined (Tella numbers
+  every segment 1).
 
 | macOS | Windows |
 |---|---|

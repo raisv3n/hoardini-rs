@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     future::Future,
     io::{self, Write},
-    os::windows::fs::FileExt,
+    os::windows::fs::{FileExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -56,6 +56,9 @@ pub struct Options {
     pub cancel: CancellationToken,
     pub client: Client,
     pub on_destination: Option<DestinationFn>,
+    /// Internal: download to this hidden track file name as-is (a pair download's `.<name>.video.mp4`).
+    /// The sanitizer would strip the leading dot. Track files are temporary, so they get no Mark of the Web.
+    pub(crate) track_name: Option<String>,
 }
 
 impl Options {
@@ -69,6 +72,24 @@ impl Options {
             cancel: CancellationToken::new(),
             client: net::client(),
             on_destination: None,
+            track_name: None,
+        }
+    }
+
+    /// Creates or truncates `path`; a track's files are hidden. (Reopening an existing hidden file
+    /// for truncation fails unless the hidden attribute is passed again.)
+    fn create(&self, path: &Path) -> io::Result<File> {
+        let mut o = OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        if self.track_name.is_some() {
+            o.attributes(net::FILE_ATTRIBUTE_HIDDEN);
+        }
+        o.open(path)
+    }
+
+    fn mark_finished(&self, part: &Path, source: &Url) {
+        if self.track_name.is_none() {
+            net::mark_of_the_web(part, source, self.referrer());
         }
     }
 
@@ -159,7 +180,7 @@ pub fn final_name(override_name: Option<&str>, probed: &str) -> String {
 /// Downloads `url` into `opts.directory`, returning the final file path.
 pub async fn download(url: &Url, opts: &Options, progress: ProgressFn) -> Result<PathBuf> {
     let probe = cancellable(&opts.cancel, probe::run(&opts.client, url, &opts.headers)).await?;
-    let name = final_name(opts.filename.as_deref(), &probe.filename);
+    let name = opts.track_name.clone().unwrap_or_else(|| final_name(opts.filename.as_deref(), &probe.filename));
     let (final_path, _lock) = net::claim(&opts.directory, &name)?;
     if let Some(f) = &opts.on_destination {
         f(&final_path);
@@ -183,7 +204,7 @@ pub async fn download(url: &Url, opts: &Options, progress: ProgressFn) -> Result
         segments: segments::plan(length, opts.connections.max(1), MIN_SEGMENT_SIZE),
     });
     if state.segments.iter().all(|s| s.written == 0) {
-        File::create(&part)?.set_len(length)?;
+        opts.create(&part)?.set_len(length)?;
     }
     state.url = probe.final_url.clone();
     let pending: Vec<usize> = (0..state.segments.len()).filter(|&i| !state.segments[i].is_done()).collect();
@@ -234,7 +255,7 @@ pub async fn download(url: &Url, opts: &Options, progress: ProgressFn) -> Result
     if got != length {
         return Err(Error::SizeMismatch { expected: length, got });
     }
-    net::mark_of_the_web(&part, &probe.final_url, opts.referrer());
+    opts.mark_finished(&part, &probe.final_url);
     fs::rename(&part, &final_path)?;
     let _ = fs::remove_file(&state_path);
     Ok(final_path)
@@ -372,7 +393,7 @@ async fn single_stream(
     if !resp.status().is_success() {
         return Err(Error::BadResponse(resp.status().as_u16()));
     }
-    let mut file = File::create(part)?;
+    let mut file = opts.create(part)?;
     let mut done = 0u64;
     let mut buf = Vec::with_capacity(BUFFER_SIZE);
     let mut body = resp.bytes_stream();
@@ -389,7 +410,7 @@ async fn single_stream(
     done += buf.len() as u64;
     drop(file);
     progress(DownloadProgress::bytes(done, probe.length));
-    net::mark_of_the_web(part, &probe.final_url, opts.referrer());
+    opts.mark_finished(part, &probe.final_url);
     fs::rename(part, final_path)?;
     Ok(())
 }

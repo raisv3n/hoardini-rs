@@ -25,14 +25,20 @@ pub fn client() -> Client {
 
 /// Headers safe to send to `url`: credentials only go to the host the caller supplied them for.
 pub fn apply_headers(mut req: RequestBuilder, headers: &[(String, String)], url: &Url, origin: &Url) -> RequestBuilder {
-    let same_host = url.host_str().map(str::to_ascii_lowercase) == origin.host_str().map(str::to_ascii_lowercase);
-    for (k, v) in headers {
-        let credential = k.eq_ignore_ascii_case("cookie") || k.eq_ignore_ascii_case("authorization");
-        if same_host || !credential {
-            req = req.header(k.as_str(), v.as_str());
-        }
+    for (k, v) in headers_for(headers, url, origin) {
+        req = req.header(k, v);
     }
     req
+}
+
+/// `headers` without Cookie/Authorization when `url` is on a different host than `origin`.
+pub fn headers_for(headers: &[(String, String)], url: &Url, origin: &Url) -> Vec<(String, String)> {
+    let same_host = url.host_str().map(str::to_ascii_lowercase) == origin.host_str().map(str::to_ascii_lowercase);
+    headers
+        .iter()
+        .filter(|(k, _)| same_host || !(k.eq_ignore_ascii_case("cookie") || k.eq_ignore_ascii_case("authorization")))
+        .cloned()
+        .collect()
 }
 
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -63,6 +69,31 @@ pub fn mark_of_the_web(file: &Path, source: &Url, referrer: Option<&str>) {
     }
     zone += &format!("HostUrl={}\r\n", without_credentials(source));
     let _ = std::fs::write(with_suffix(file, ":Zone.Identifier"), zone);
+}
+
+/// Hidden per-track temp file of a split (video + audio) download: `.<final name>.<track>.<ext>`.
+/// The leading dot matches the macOS names; on Windows the hidden file attribute does the hiding.
+pub fn track_file(final_path: &Path, track: &str, ext: &str) -> PathBuf {
+    let name = final_path.file_name().unwrap_or_default().to_string_lossy();
+    final_path.with_file_name(format!(".{name}.{track}.{ext}"))
+}
+
+/// Deletes everything an unfinished download leaves next to `final_path`: the .part file, the resume
+/// state, and the hidden track files (with their own .part/.hoardini). Call it only once the download
+/// has stopped, or it may recreate them.
+pub fn remove_partial(final_path: &Path) {
+    for s in [".part", ".hoardini"] {
+        let _ = std::fs::remove_file(with_suffix(final_path, s));
+    }
+    let (Some(dir), Some(name)) = (final_path.parent(), final_path.file_name()) else { return };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        if f.strip_prefix(&prefix).is_some_and(|rest| rest.starts_with("video.") || rest.starts_with("audio.")) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// An exclusive, delete-on-close `<name>.lock` file: the lock disappears even if the process crashes.
@@ -143,6 +174,25 @@ mod tests {
         assert!(zone.contains("ZoneId=3"));
         assert!(zone.contains("HostUrl=https://example.com/x"));
         assert!(zone.contains("ReferrerUrl=https://example.com/"));
+    }
+
+    #[test]
+    fn remove_partial_deletes_only_this_downloads_leftovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("x.mp4");
+        let ours = ["x.mp4.part", "x.mp4.hoardini", ".x.mp4.video.mp4", ".x.mp4.audio.m4a", ".x.mp4.video.mp4.part", ".x.mp4.audio.mp4.hoardini"];
+        let others = ["x.mp4", "y.mp4.part", ".y.mp4.video.mp4", ".x.mp4.other", "x.mp4.video.mp4"];
+        for f in ours.iter().chain(&others) {
+            std::fs::write(dir.path().join(f), b"x").unwrap();
+        }
+        assert_eq!(track_file(&final_path, "video", "mp4"), dir.path().join(".x.mp4.video.mp4"));
+        remove_partial(&final_path);
+        for f in ours {
+            assert!(!dir.path().join(f).exists(), "{f} should be gone");
+        }
+        for f in others {
+            assert!(dir.path().join(f).exists(), "{f} should stay");
+        }
     }
 
     #[test]

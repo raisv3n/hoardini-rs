@@ -3,10 +3,12 @@
 
 pub mod downloader;
 pub mod error;
+pub mod fmp4;
 pub mod hls;
 pub mod instance;
 pub mod job;
 pub mod net;
+pub mod pair;
 pub mod paths;
 pub mod probe;
 pub mod remux;

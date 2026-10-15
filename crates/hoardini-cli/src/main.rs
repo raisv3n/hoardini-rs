@@ -1,5 +1,6 @@
-//! usage: hoardini <url> [-o dir] [-n connections] [-H "Name: value"]... [--headers-stdin] [--name file] [--hls] [--variant url]
+//! usage: hoardini <url> [-o dir] [-n connections] [-H "Name: value"]... [--headers-stdin] [--name file] [--hls] [--variant url] [--audio url]
 //!        hoardini convert <file.ts>...    lossless remux to MP4 next to each file
+//! --audio: <url> is a video-only file; also download this audio-only file and merge both into one MP4.
 //! --headers-stdin reads more "Name: value" lines from stdin, so cookies never appear in the process list.
 
 use std::{
@@ -10,9 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use hoardini_core::{downloader, hls, job::http_url, remux, CancellationToken, DownloadProgress, Error, Options};
+use hoardini_core::{downloader, hls, job::http_url, pair, remux, CancellationToken, DownloadProgress, Error, Options};
 
-const USAGE: &str = "usage: hoardini <http(s) url> [-o dir] [-n connections] [-H \"Name: value\"]... [--headers-stdin] [--name file] [--hls] [--variant url]\n       hoardini convert <file>...";
+const USAGE: &str = "usage: hoardini <http(s) url> [-o dir] [-n connections] [-H \"Name: value\"]... [--headers-stdin] [--name file] [--hls] [--variant url] [--audio url]\n       hoardini convert <file>...";
 
 fn take(args: &mut Vec<String>, flag: &str) -> Option<String> {
     let i = args.iter().position(|a| a == flag)?;
@@ -84,6 +85,7 @@ async fn main() -> ExitCode {
     }
     let name = take(&mut args, "--name");
     let variant = take(&mut args, "--variant").and_then(|v| http_url(&v));
+    let audio = take(&mut args, "--audio").and_then(|a| http_url(&a));
     let force_hls = take_switch(&mut args, "--hls");
 
     let Some(url) = args.first().and_then(|a| http_url(a)) else {
@@ -119,6 +121,8 @@ async fn main() -> ExitCode {
     let is_hls = force_hls || hoardini_core::job::url_extension(&url) == "m3u8";
     let result = if is_hls {
         hls::download(&url, &opts, on_progress).await
+    } else if let Some(audio) = &audio {
+        pair::download(&url, audio, &opts, on_progress).await
     } else {
         downloader::download(&url, &opts, on_progress).await
     };

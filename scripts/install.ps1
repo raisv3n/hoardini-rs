@@ -92,7 +92,7 @@ $lnk.Save()
 
 Write-Host "Installed to $bin" -ForegroundColor Green
 
-# ffmpeg is optional: only MP4 conversion and HLS streams with separate audio need it.
+# ffmpeg is optional: only MP4 conversion and videos with separate audio (Vimeo, Facebook HD) need it.
 # Looked up the same way the app does: PATH, then winget's links folder.
 $wingetLink = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\ffmpeg.exe'
 $hasFfmpeg = (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue) -or (Test-Path $wingetLink)
@@ -110,8 +110,19 @@ if (-not $hasFfmpeg -and -not $NoFfmpeg) {
     }
 }
 
+# The browser keeps reading an unpacked extension from the folder it was loaded from, so it must be
+# this permanent copy: one loaded from the download stops working once the download is deleted.
+$copied = $true
+try { Set-Clipboard -Value $extDir } catch { $copied = $false }
+
 Write-Host ''
 Write-Host 'Last step: add the browser extension.' -ForegroundColor Cyan
-Write-Host '  1. Open chrome://extensions (or edge://extensions) and turn on Developer mode.'
-Write-Host "  2. Click 'Load unpacked' and choose: $extDir"
-Write-Host 'After updating Hoardini, click the reload icon on the extension card.'
+Write-Host '  1. Open your browser''s extensions page: chrome://extensions, edge://extensions or brave://extensions'
+Write-Host '     and turn on Developer mode.'
+Write-Host "  2. Click 'Load unpacked'. In the folder window, click the address bar, press Ctrl+V, then Enter,"
+Write-Host "     then 'Select Folder'. The folder is:"
+Write-Host "       $extDir" -ForegroundColor Green
+if ($copied) { Write-Host '     (already copied to the clipboard)' }
+Write-Host '     Do NOT pick the "extension" folder inside the download: the extension would stop working' -ForegroundColor Yellow
+Write-Host '     when you delete the download.' -ForegroundColor Yellow
+Write-Host 'After updating Hoardini, click the reload icon on the extension card and reload any open Facebook tabs.'

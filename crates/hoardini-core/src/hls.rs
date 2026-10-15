@@ -10,11 +10,13 @@ use std::{
 
 use bytes::Bytes;
 use reqwest::{header, Client};
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
     downloader::{backoff, cancellable},
+    fmp4,
     job::url_extension,
     net::{self, with_suffix, FILE_ATTRIBUTE_HIDDEN},
     probe, remux, DownloadProgress, Error, Options, ProgressFn, Result,
@@ -230,24 +232,111 @@ pub async fn download(url: &Url, opts: &Options, progress: ProgressFn) -> Result
     }
 
     let part = with_suffix(&final_path, ".part");
-    let counter = SegmentCounter::new(media.segments.len() + audio.as_ref().map_or(0, |a| a.segments.len()), progress);
-    if let Some(audio) = &audio {
-        // Each track goes to its own hidden temp file, then both are muxed into the .part file.
-        let file_name = final_path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let temp = |track: &str, e: &str| opts.directory.join(format!(".{file_name}.{track}.{e}"));
-        let video_tmp = temp("video", video_ext);
-        let audio_tmp = temp("audio", audio_extension(audio));
-        let _cleanup = RemoveOnDrop(vec![video_tmp.clone(), audio_tmp.clone()]);
-        write(&f, &media, &video_tmp, &counter, true).await?;
-        write(&f, audio, &audio_tmp, &counter, true).await?;
+    // Each track of a split stream goes to its own hidden temp file, then both are muxed into the .part file.
+    let tracks: Vec<(&MediaPlaylist, PathBuf)> = match &audio {
+        Some(a) => vec![
+            (&media, net::track_file(&final_path, "video", video_ext)),
+            (a, net::track_file(&final_path, "audio", audio_extension(a))),
+        ],
+        None => vec![(&media, part.clone())],
+    };
+
+    // Pick up where a paused or interrupted download stopped, if it was the same stream.
+    let counts: Vec<usize> = tracks.iter().map(|(m, _)| m.segments.len()).collect();
+    let mut store = ResumeStore {
+        path: with_suffix(&final_path, ".hoardini"),
+        state: HlsState::fresh(url, opts.variant.as_ref(), &counts),
+    };
+    if let Some(saved) = HlsState::load(&store.path, url, opts.variant.as_ref(), &counts) {
+        store.state = saved;
+    }
+    store.save();
+    let counter = SegmentCounter::new(counts.iter().sum(), progress, &store.state.tracks);
+    for (k, (m, path)) in tracks.iter().enumerate() {
+        write(&f, m, path, k, &mut store, &counter, audio.is_some()).await?;
+    }
+    if audio.is_some() {
         let _ = fs::remove_file(&part);
-        remux::merge(&video_tmp, &audio_tmp, &part, &opts.cancel).await?;
-    } else {
-        write(&f, &media, &part, &counter, false).await?;
+        // Cancelling (pause) kills ffmpeg; the track files stay, so a resume goes straight to merging.
+        remux::merge(&tracks[0].1, &tracks[1].1, &part, &opts.cancel).await?;
+        for (_, path) in &tracks {
+            let _ = fs::remove_file(path);
+        }
     }
     net::mark_of_the_web(&part, url, opts.referrer());
     fs::rename(&part, &final_path)?;
+    let _ = fs::remove_file(&store.path);
     Ok(final_path)
+}
+
+/// How far one track (video, audio, or the only one) of an HLS download got.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TrackState {
+    /// Playlist length, to tell whether the stream changed.
+    segments: usize,
+    /// Segments fully written, in playlist order.
+    done: usize,
+    /// Track file length after those segments (and the init segment).
+    bytes: u64,
+    /// Next fMP4 fragment number.
+    sequence: u32,
+}
+
+impl TrackState {
+    fn new(segments: usize) -> Self {
+        Self { segments, done: 0, bytes: 0, sequence: 1 }
+    }
+}
+
+/// Persisted as `<final name>.hoardini` so a paused or interrupted HLS download can continue.
+/// Same JSON as the macOS app.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct HlsState {
+    source: Url,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variant: Option<Url>,
+    tracks: Vec<TrackState>,
+}
+
+impl HlsState {
+    fn fresh(source: &Url, variant: Option<&Url>, counts: &[usize]) -> Self {
+        Self { source: source.clone(), variant: variant.cloned(), tracks: counts.iter().map(|&n| TrackState::new(n)).collect() }
+    }
+
+    /// Saved progress for this exact stream, or `None` when there is none, it is unreadable (anything
+    /// can edit a file in Downloads), or the playlists changed. Segment URLs are not compared: signed
+    /// URLs (Tella's CloudFront) are re-signed between runs.
+    fn load(path: &Path, source: &Url, variant: Option<&Url>, counts: &[usize]) -> Option<Self> {
+        let mut s: HlsState = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
+        let same = &s.source == source
+            && s.variant.as_ref() == variant
+            && s.tracks.iter().map(|t| t.segments).eq(counts.iter().copied())
+            && s.tracks.iter().all(|t| t.done <= t.segments && t.sequence > 0);
+        if !same {
+            return None;
+        }
+        // Nothing is kept for a track with no finished segment: it starts with a fresh file.
+        for t in s.tracks.iter_mut().filter(|t| t.done == 0) {
+            *t = TrackState::new(t.segments);
+        }
+        Some(s)
+    }
+}
+
+struct ResumeStore {
+    path: PathBuf,
+    state: HlsState,
+}
+
+impl ResumeStore {
+    fn save(&self) {
+        if let Ok(data) = serde_json::to_vec(&self.state) {
+            let tmp = with_suffix(&self.path, ".tmp");
+            if fs::write(&tmp, data).is_ok() {
+                let _ = fs::rename(&tmp, &self.path);
+            }
+        }
+    }
 }
 
 /// Packed audio keeps its own extension (.aac, .mp3) so the muxer recognises it.
@@ -273,52 +362,72 @@ fn default_name(url: &Url) -> String {
     format!("video-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"))
 }
 
-struct RemoveOnDrop(Vec<PathBuf>);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        for p in &self.0 {
-            let _ = fs::remove_file(p);
-        }
+/// Appends the playlist's segments in order to `path`, continuing after the ones the store says are
+/// done, and saves the store after each window. The file is kept on failure or pause so the download
+/// can resume.
+async fn write(
+    f: &Fetcher,
+    m: &MediaPlaylist,
+    path: &Path,
+    k: usize,
+    store: &mut ResumeStore,
+    counter: &SegmentCounter,
+    hidden: bool,
+) -> Result<()> {
+    let mut t = store.state.tracks[k].clone();
+    let on_disk = fs::metadata(path).map(|md| md.len()).ok();
+    if t.done > 0 && on_disk.is_none_or(|n| n < t.bytes) {
+        // The track file is gone or short: this track starts over.
+        counter.sub(t.bytes, t.done);
+        t = TrackState::new(t.segments);
     }
-}
-
-/// Downloads the playlist's segments in order into `path`; removes it on failure.
-async fn write(f: &Fetcher, m: &MediaPlaylist, path: &Path, counter: &SegmentCounter, hidden: bool) -> Result<()> {
-    let r = async {
-        let mut opts = OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        if hidden {
-            opts.attributes(FILE_ATTRIBUTE_HIDDEN);
-        }
-        drop(opts.open(path)?);
-        // Appended one window at a time and closed in between: NTFS only refreshes the size that
-        // Explorer shows when the handle closes, so a file held open looks stuck at 0 KB.
-        let append = |datas: &[Bytes]| -> Result<usize> {
-            let mut file = OpenOptions::new().append(true).open(path)?;
-            let mut bytes = 0;
-            for d in datas {
+    let mut opts = OpenOptions::new();
+    opts.write(true).create(true);
+    if hidden {
+        // Also needed to reopen an existing hidden file: Windows refuses otherwise.
+        opts.attributes(FILE_ATTRIBUTE_HIDDEN);
+    }
+    // Bytes past the last saved window are from one that was cut off; drop them.
+    opts.open(path)?.set_len(t.bytes)?;
+    // Appended one window at a time and closed in between: NTFS only refreshes the size that
+    // Explorer shows when the handle closes, so a file held open looks stuck at 0 KB.
+    let append = |datas: &[Bytes], t: &mut TrackState| -> Result<usize> {
+        let mut file = OpenOptions::new().append(true).open(path)?;
+        let mut bytes = 0;
+        for d in datas {
+            if m.init_segment.is_some() {
+                // fMP4 segments get fresh fragment numbers so players read past the first one.
+                let mut d = d.to_vec();
+                fmp4::renumber_fragments(&mut d, &mut t.sequence);
+                file.write_all(&d)?;
+            } else {
                 file.write_all(d)?;
-                bytes += d.len();
             }
-            Ok(bytes)
-        };
+            bytes += d.len();
+        }
+        t.bytes += bytes as u64;
+        Ok(bytes)
+    };
+
+    if t.done == 0 {
         if let Some(init) = &m.init_segment {
             let d = f.segment(init).await?;
-            counter.add(append(&[d])?, 0);
+            let mut file = OpenOptions::new().append(true).open(path)?;
+            file.write_all(&d)?;
+            t.bytes = d.len() as u64;
+            counter.add(d.len() as u64, 0);
         }
-        // Download in windows of `PARALLEL` segments, writing each window in order.
-        for window in m.segments.chunks(PARALLEL) {
-            let datas = futures_util::future::try_join_all(window.iter().map(|s| f.segment(s))).await?;
-            counter.add(append(&datas)?, window.len());
-        }
-        Ok(())
     }
-    .await;
-    if r.is_err() {
-        let _ = fs::remove_file(path);
+    // Download in windows of `PARALLEL` segments, writing each window in order.
+    for window in m.segments[t.done..].chunks(PARALLEL) {
+        let datas = futures_util::future::try_join_all(window.iter().map(|s| f.segment(s))).await?;
+        let bytes = append(&datas, &mut t)?;
+        t.done += window.len();
+        store.state.tracks[k] = t.clone();
+        store.save();
+        counter.add(bytes as u64, window.len());
     }
-    r
+    Ok(())
 }
 
 struct Fetcher {
@@ -389,15 +498,32 @@ struct SegmentCounter {
 }
 
 impl SegmentCounter {
-    fn new(total: usize, progress: ProgressFn) -> Self {
-        Self { state: Mutex::new((0, 0)), total: total.max(1), progress }
+    /// Starts from what is already on disk, and reports it right away.
+    fn new(total: usize, progress: ProgressFn, saved: &[TrackState]) -> Self {
+        let start = (saved.iter().map(|t| t.bytes).sum(), saved.iter().map(|t| t.done).sum());
+        let c = Self { state: Mutex::new(start), total: total.max(1), progress };
+        c.add(0, 0);
+        c
     }
 
-    fn add(&self, bytes: usize, segments: usize) {
+    fn add(&self, bytes: u64, segments: usize) {
+        self.update(|s| {
+            s.0 += bytes;
+            s.1 += segments;
+        });
+    }
+
+    fn sub(&self, bytes: u64, segments: usize) {
+        self.update(|s| {
+            s.0 = s.0.saturating_sub(bytes);
+            s.1 = s.1.saturating_sub(segments);
+        });
+    }
+
+    fn update(&self, f: impl FnOnce(&mut (u64, usize))) {
         let p = {
             let mut s = self.state.lock().unwrap();
-            s.0 += bytes as u64;
-            s.1 += segments;
+            f(&mut s);
             DownloadProgress { done: s.0, total: None, fraction_override: Some(s.1 as f64 / self.total as f64) }
         };
         (self.progress)(p);

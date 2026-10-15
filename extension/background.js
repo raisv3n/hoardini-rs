@@ -17,9 +17,9 @@ async function cookieHeader(url, referrer) {
     .map(c => `${c.name}=${c.value}`).join("; ");
 }
 
-async function sendToHoardini({ url, referrer, kind = "file", filename = "", variant = "" }) {
+async function sendToHoardini({ url, referrer, kind = "file", filename = "", variant = "", audio = "" }) {
   const res = await chrome.runtime.sendNativeMessage(HOST, {
-    url, referrer: referrer || "", kind, filename, variant,
+    url, referrer: referrer || "", kind, filename, variant, audio,
     cookies: await cookieHeader(url, referrer),
     userAgent: navigator.userAgent,
   });
@@ -66,6 +66,8 @@ function classify(details, headers) {
     return { kind: "hls", size: 0 };
   }
   if (SEGMENT_EXT.test(path) || ct === "video/mp2t") return null;
+  // DASH players (Facebook, Instagram) fetch pieces of one file as ?bytestart=…&byteend=…; a piece is not a download.
+  if (url.searchParams.has("bytestart") || url.searchParams.has("byteend")) return null;
 
   const isMedia = ct.startsWith("video/") || ct.startsWith("audio/") || FILE_EXT.test(path);
   if (!isMedia) return null;
@@ -151,8 +153,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     return true;
   }
   if (msg.type === "download") {
-    const { url, referrer, kind, title, variant } = msg.item;
-    sendToHoardini({ url, referrer, kind, filename: title, variant })
+    const { url, referrer, kind, title, variant, audio } = msg.item;
+    sendToHoardini({ url, referrer, kind, filename: title, variant, audio })
       .then(() => reply({ ok: true }), e => reply({ ok: false, error: String(e.message || e) }));
     return true;
   }

@@ -53,8 +53,17 @@ fn extension(p: &Path) -> String {
     p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
-/// Containers worth converting without being asked (an auto-convert of a .zip would only fail).
-const AUTO_CONVERT: &[&str] = &["ts", "m2ts", "mts", "mkv", "webm", "flv"];
+/// The only files "Convert to MP4" is offered for (and auto-convert applies to): MPEG-TS, which is
+/// what older HLS downloads produce and what ffmpeg remuxes losslessly into MP4.
+pub const CONVERTIBLE: &[&str] = &["ts", "mts", "m2ts"];
+
+/// What a finished file is, for the Open button's icon and wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Video,
+    Audio,
+    Other,
+}
 
 impl DownloadItem {
     pub fn new(request: JobRequest) -> Self {
@@ -102,18 +111,25 @@ impl DownloadItem {
         self.status == Status::Completed
             && !self.is_converting()
             && self.mp4.is_none()
-            && self.destination.as_deref().is_some_and(|d| !["mp4", "m4v", "mov"].contains(&extension(d).as_str()))
+            && self.destination.as_deref().is_some_and(|d| CONVERTIBLE.contains(&extension(d).as_str()))
     }
 
-    /// Offered (and done automatically) only for video containers; files picked via
-    /// "Convert Files…" are converted whatever their extension, as in the original.
-    pub fn should_auto_convert(&self) -> bool {
-        self.can_convert() && self.destination.as_deref().is_some_and(|d| AUTO_CONVERT.contains(&extension(d).as_str()))
+    /// Judged on the converted MP4 when there is one. A file without an extension is a video if it
+    /// came from a stream.
+    pub fn kind(&self) -> Kind {
+        let ext = self.playable().map(extension).unwrap_or_default();
+        if ext.is_empty() {
+            return if self.request.is_hls() { Kind::Video } else { Kind::Other };
+        }
+        if CONVERTIBLE.contains(&ext.as_str()) {
+            return Kind::Video;
+        }
+        crate::win::perceived_kind(&ext)
     }
 
-    /// HLS downloads cannot resume, so they are not pausable.
+    /// Every download can pause, streams included: they resume from the next unfinished segment.
     pub fn can_pause(&self) -> bool {
-        !self.request.is_hls() && self.status == Status::Downloading
+        self.status == Status::Downloading
     }
 
     pub fn eta_seconds(&self) -> Option<f64> {
@@ -157,5 +173,53 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_convert: true, delete_original: false, theme: ThemeMode::System, hide_ffmpeg_notice: false }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finished(name: &str, hls: bool) -> DownloadItem {
+        let mut req = JobRequest::new("https://e.x/a");
+        if hls {
+            req.kind = Some("hls".into());
+        }
+        let mut item = DownloadItem::new(req);
+        item.status = Status::Completed;
+        item.destination = Some(PathBuf::from(format!(r"C:\Downloads\{name}")));
+        item
+    }
+
+    #[test]
+    fn only_mpeg_ts_is_convertible() {
+        for name in ["a.ts", "b.MTS", "c.m2ts"] {
+            assert!(finished(name, false).can_convert(), "{name}");
+        }
+        for name in ["a.zip", "b.pdf", "c.mkv", "d.mp4", "e"] {
+            assert!(!finished(name, false).can_convert(), "{name}");
+        }
+    }
+
+    #[test]
+    fn kind_picks_the_open_button() {
+        assert_eq!(finished("a.ts", false).kind(), Kind::Video);
+        assert_eq!(finished("a.mp4", false).kind(), Kind::Video);
+        assert_eq!(finished("a.mp3", false).kind(), Kind::Audio);
+        assert_eq!(finished("a.zip", false).kind(), Kind::Other);
+        assert_eq!(finished("noext", true).kind(), Kind::Video);
+        assert_eq!(finished("noext", false).kind(), Kind::Other);
+        // The converted MP4 decides once there is one.
+        let mut converted = finished("a.ts", false);
+        converted.mp4 = Some(PathBuf::from(r"C:\Downloads\a.mp4"));
+        assert_eq!(converted.kind(), Kind::Video);
+        assert!(!converted.can_convert());
+    }
+
+    #[test]
+    fn every_download_can_pause() {
+        let mut item = finished("a.ts", true);
+        item.status = Status::Downloading;
+        assert!(item.can_pause());
     }
 }

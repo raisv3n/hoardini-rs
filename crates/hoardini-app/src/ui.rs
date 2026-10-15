@@ -11,7 +11,7 @@ use hoardini_core::{paths, JobRequest};
 
 use crate::{
     manager::{winget_path, Ffmpeg, Manager, FFMPEG_DOWNLOAD_PAGE},
-    model::{DownloadItem, Status, ThemeMode},
+    model::{self, DownloadItem, Status, ThemeMode},
     theme::{self, icon, Palette},
     tray, widgets,
     widgets::{Kind, ProgressState, Severity},
@@ -96,7 +96,10 @@ impl HoardiniApp {
     }
 
     fn pick_files_to_convert(&self) {
-        if let Some(files) = rfd::FileDialog::new().set_title("Choose video files to convert to MP4").pick_files() {
+        let picker = rfd::FileDialog::new()
+            .set_title("Choose MPEG-TS videos to convert to MP4")
+            .add_filter("MPEG-TS video", model::CONVERTIBLE);
+        if let Some(files) = picker.pick_files() {
             self.manager.convert_files(files);
         }
     }
@@ -162,7 +165,7 @@ impl HoardiniApp {
             if widgets::button(ui, Kind::Accent, Some(icon::ADD), "Add URL", true).on_hover_text("Ctrl+N").clicked() {
                 self.open_add_dialog();
             }
-            if widgets::button(ui, Kind::Standard, Some(icon::VIDEO), "Convert files…", true)
+            if widgets::button(ui, Kind::Standard, Some(icon::CONVERT), "Convert files…", true)
                 .on_hover_text("Convert existing .ts files to MP4 · Ctrl+O")
                 .clicked()
             {
@@ -268,7 +271,7 @@ impl HoardiniApp {
 
     fn row(&self, ui: &mut Ui, p: &Palette, item: &DownloadItem) {
         let (glyph, color) = match item.status {
-            _ if item.is_converting() => (icon::VIDEO, p.accent),
+            _ if item.is_converting() => (icon::CONVERT, p.accent),
             Status::Failed if item.needs_ffmpeg => (icon::WARNING, p.caution),
             Status::Queued => (icon::CLOCK, p.text3),
             Status::Downloading => (icon::DOWNLOAD, p.accent),
@@ -350,12 +353,13 @@ impl HoardiniApp {
                         win::reveal(&p);
                     }
                 }
-                if widgets::icon_button(ui, icon::OPEN, "Open").clicked() {
+                let (glyph, help) = open_button(item);
+                if widgets::icon_button(ui, glyph, help).clicked() {
                     if let Some(p) = m.playable(item.id) {
                         win::open(&p);
                     }
                 }
-                if item.should_auto_convert() && !item.needs_ffmpeg && widgets::icon_button(ui, icon::VIDEO, "Convert to MP4").clicked() {
+                if item.can_convert() && !item.needs_ffmpeg && widgets::icon_button(ui, icon::CONVERT, "Convert to MP4").clicked() {
                     m.convert(item.id);
                 }
             }
@@ -379,10 +383,11 @@ impl HoardiniApp {
         let mut entries = Vec::new();
         match item.status {
             Status::Completed => {
-                entries.push((icon::OPEN, "Open", Action::Open));
+                let (glyph, label) = open_button(item);
+                entries.push((glyph, label, Action::Open));
                 entries.push((icon::FOLDER, "Show in Explorer", Action::Reveal));
-                if item.should_auto_convert() && !item.needs_ffmpeg {
-                    entries.push((icon::VIDEO, "Convert to MP4", Action::Convert));
+                if item.can_convert() && !item.needs_ffmpeg {
+                    entries.push((icon::CONVERT, "Convert to MP4", Action::Convert));
                 }
             }
             Status::Downloading if item.can_pause() => entries.push((icon::PAUSE, "Pause", Action::Pause)),
@@ -447,7 +452,7 @@ impl HoardiniApp {
             ui.add_space(20.0);
 
             section(ui, p, "Conversion");
-            setting(ui, p, icon::VIDEO, "Convert to MP4 automatically", "Remux finished video downloads (.ts, .mkv, .webm…) to MP4 without re-encoding", |ui| {
+            setting(ui, p, icon::CONVERT, "Convert to MP4 automatically", "Remux finished MPEG-TS downloads (.ts, .mts, .m2ts) to MP4 without re-encoding", |ui| {
                 changed |= widgets::toggle(ui, &mut s.auto_convert).changed();
             });
             setting(ui, p, icon::DELETE, "Delete the .ts after converting", "Keep only the MP4 once the conversion has finished", |ui| {
@@ -600,6 +605,15 @@ impl HoardiniApp {
 fn section(ui: &mut Ui, p: &Palette, title: &str) {
     widgets::text(ui, title, theme::body_strong(), p.text, false);
     ui.add_space(4.0);
+}
+
+/// The Open button's icon and wording by file type. Clicking always opens the file in its default app.
+fn open_button(item: &DownloadItem) -> (char, &'static str) {
+    match item.kind() {
+        model::Kind::Video => (icon::VIDEO, "Play"),
+        model::Kind::Audio => (icon::AUDIO, "Play"),
+        model::Kind::Other => (icon::OPEN, "Open"),
+    }
 }
 
 /// Windows 11 Settings-style card: icon, title + description, control on the right.

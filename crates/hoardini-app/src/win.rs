@@ -1,6 +1,15 @@
 //! Win32 window plumbing (the NSApp/NSWorkspace calls of the macOS version).
 
-use std::{os::windows::process::CommandExt, path::Path, process::Command, ptr};
+use std::{
+    collections::HashMap,
+    os::windows::process::CommandExt,
+    path::Path,
+    process::Command,
+    ptr,
+    sync::{Mutex, OnceLock},
+};
+
+use crate::model::Kind;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::{
@@ -104,6 +113,41 @@ pub fn open(path: &Path) {
 /// Opens a web page in the default browser.
 pub fn open_url(url: &str) {
     let _ = Command::new("explorer.exe").arg(url).spawn();
+}
+
+/// Video, audio or other, by what Windows says the extension is (`HKCR\.<ext>` `PerceivedType`,
+/// the counterpart of macOS's UTType movie/audio), with a built-in list for unregistered types.
+pub fn perceived_kind(ext: &str) -> Kind {
+    static CACHE: OnceLock<Mutex<HashMap<String, Kind>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(k) = cache.lock().unwrap().get(ext) {
+        return *k;
+    }
+    let kind = match registry_perceived_type(ext).as_deref() {
+        Some("video") => Kind::Video,
+        Some("audio") => Kind::Audio,
+        _ if ["mp4", "m4v", "mov", "mkv", "webm", "avi", "wmv", "flv", "mpg", "mpeg", "3gp"].contains(&ext) => Kind::Video,
+        _ if ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma"].contains(&ext) => Kind::Audio,
+        _ => Kind::Other,
+    };
+    cache.lock().unwrap().insert(ext.to_owned(), kind);
+    kind
+}
+
+fn registry_perceived_type(ext: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CLASSES_ROOT, RRF_RT_REG_SZ};
+    let key: Vec<u16> = format!(".{ext}").encode_utf16().chain(Some(0)).collect();
+    let value: Vec<u16> = "PerceivedType".encode_utf16().chain(Some(0)).collect();
+    let mut buf = [0u16; 64];
+    let mut len = size_of_val(&buf) as u32;
+    let r = unsafe {
+        RegGetValueW(HKEY_CLASSES_ROOT, key.as_ptr(), value.as_ptr(), RRF_RT_REG_SZ, ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len)
+    };
+    if r != 0 {
+        return None;
+    }
+    let s = String::from_utf16_lossy(&buf[..(len as usize / 2)]);
+    Some(s.trim_end_matches('\0').to_ascii_lowercase())
 }
 
 /// "Show in Explorer" with the file selected.

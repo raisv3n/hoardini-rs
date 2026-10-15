@@ -4,7 +4,7 @@
 //!   1. hoardini-app.exe installed next to it -> write the job to its inbox (launching the app if needed).
 //!   2. otherwise                             -> start a detached `hoardini.exe` process.
 //!
-//! Request:  {"url", "referrer", "cookies": "a=b; c=d", "userAgent", "kind": "file"|"hls", "filename", "variant"}
+//! Request:  {"url", "referrer", "cookies": "a=b; c=d", "userAgent", "kind": "file"|"hls", "filename", "variant", "audio"}
 //! Response: {"ok": true} or {"ok": false, "error": "..."}
 
 use std::{
@@ -76,6 +76,9 @@ fn run_cli(job: &JobRequest, url: &str) -> Result<(), String> {
         if let Some(v) = job.valid_variant() {
             cmd.arg("--variant").arg(v.as_str());
         }
+    }
+    if let Some(a) = job.valid_audio() {
+        cmd.arg("--audio").arg(a.as_str());
     }
     if let Some(n) = job.clean_filename() {
         cmd.arg("--name").arg(n);

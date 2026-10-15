@@ -26,6 +26,8 @@ pub mod icon {
     pub const DOWNLOAD: char = '\u{E896}';
     pub const SETTINGS: char = '\u{E713}';
     pub const VIDEO: char = '\u{E714}';
+    pub const AUDIO: char = '\u{E8D6}';
+    pub const CONVERT: char = '\u{E8AB}';
     pub const BROOM: char = '\u{EA99}';
     pub const PAUSE: char = '\u{E769}';
     pub const PLAY: char = '\u{E768}';

@@ -22,6 +22,9 @@ pub struct JobRequest {
     /// HLS only: the variant playlist picked in the popup, with `url` being its master.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// File downloads only: a separate audio-only file to merge with the video-only `url` (DASH, e.g. Facebook).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<String>,
 }
 
 impl JobRequest {
@@ -36,6 +39,14 @@ impl JobRequest {
 
     pub fn valid_variant(&self) -> Option<Url> {
         self.variant.as_deref().and_then(http_url)
+    }
+
+    /// HLS jobs find their own audio track in the master playlist, so they ignore this.
+    pub fn valid_audio(&self) -> Option<Url> {
+        if self.is_hls() {
+            return None;
+        }
+        self.audio.as_deref().and_then(http_url)
     }
 
     pub fn is_hls(&self) -> bool {
@@ -87,6 +98,18 @@ mod tests {
         assert_eq!(j.headers(), vec![("Cookie".into(), "a=b".into()), ("User-Agent".into(), "UA".into())]);
         assert_eq!(j.clean_filename(), None);
         assert_eq!(j.valid_variant(), None);
+        assert_eq!(j.valid_audio(), None);
+    }
+
+    #[test]
+    fn audio_only_for_file_jobs() {
+        let j: JobRequest =
+            serde_json::from_str(r#"{"url":"https://v.fbcdn.net/v.mp4","kind":"file","audio":"https://v.fbcdn.net/a.mp4"}"#).unwrap();
+        assert_eq!(j.valid_audio().unwrap().as_str(), "https://v.fbcdn.net/a.mp4");
+        let hls = JobRequest { kind: Some("hls".into()), ..j.clone() };
+        assert_eq!(hls.valid_audio(), None);
+        let bad = JobRequest { audio: Some("file:///C:/a.mp4".into()), ..j };
+        assert_eq!(bad.valid_audio(), None);
     }
 
     #[test]
